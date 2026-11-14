@@ -3,13 +3,13 @@ import { GLTFLoader } from "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/
 import { FBXLoader } from "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/loaders/FBXLoader.js";
 import * as SkeletonUtils from "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/utils/SkeletonUtils.js";
 
-const ARENA_SIZE = 50;
+const ARENA_SIZE = 64;
 const PLAYER_HEIGHT = 1.7;
 const PLAYER_SPEED = 7;
 const ENEMY_SPEED = 1.5;
 const ENEMY_STOP_DISTANCE = 7;
 const ENEMY_DETECTION_DISTANCE = 14;
-const ENEMY_WANDER_RADIUS = 8;
+const ENEMY_WANDER_RADIUS = 14;
 const ENEMY_DAMAGE_COOLDOWN = 800;
 const ENEMY_FIRE_COOLDOWN = 1800;
 const ENEMY_PROJECTILE_SPEED = 12;
@@ -17,6 +17,7 @@ const ENEMY_PROJECTILE_DAMAGE = 5;
 const BARREL_EXPLOSION_RADIUS = 4.5;
 const BARREL_EXPLOSION_DAMAGE = 65;
 const MAX_ENEMIES = 10;
+const MAX_RENDER_PIXEL_RATIO = 1.75;
 const weapons = [
   { name: "手槍", cooldown: 260, damage: 50, color: 0x44eaff, magazineSize: 12, reserveSize: 36, pickupAmount: 18, sound: "shoot1.mp3" },
   { name: "脈衝槍", cooldown: 100, damage: 25, color: 0xffc857, magazineSize: 40, reserveSize: 120, pickupAmount: 60, sound: "gun03.mp3" },
@@ -35,17 +36,28 @@ document.addEventListener("mouseup", (event) => {
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x050816);
-scene.fog = new THREE.Fog(0x050816, 18, 48);
+scene.fog = new THREE.Fog(0x050816, 22, 68);
 
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 140);
 camera.position.set(0, PLAYER_HEIGHT, 9);
 camera.layers.enable(1);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 scene.add(camera);
+
+function updateRenderQuality() {
+  const isSmallScreen = window.innerWidth < 900;
+  const pixelRatioLimit = isSmallScreen ? 1.35 : MAX_RENDER_PIXEL_RATIO;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatioLimit));
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+}
+
+updateRenderQuality();
 
 scene.add(new THREE.HemisphereLight(0x8db7ff, 0x12091e, 1.8));
 const blueLight = new THREE.PointLight(0x26c6ff, 30, 25);
@@ -69,7 +81,9 @@ const enemies = [];
 const obstacles = [];
 const explosiveBarrels = [];
 const explosionEffects = [];
+const explosionEffectPool = [];
 const enemyProjectiles = [];
+const enemyProjectilePool = [];
 const ammoPickups = [];
 const reloadSound = new Audio("./bullet.mp3");
 const raycaster = new THREE.Raycaster();
@@ -149,22 +163,32 @@ function removeExplosiveBarrel(barrel) {
 }
 
 function createExplosionEffect(position) {
+  const effect = explosionEffectPool.pop() || createExplosionEffectObject();
+  const [flash, shockwave] = effect.children;
+  flash.material.opacity = 0.95;
+  shockwave.material.opacity = 0.9;
+  flash.scale.setScalar(1);
+  shockwave.scale.setScalar(1);
+  effect.position.copy(position);
+  effect.userData.life = 0.45;
+  scene.add(effect);
+  explosionEffects.push(effect);
+}
+
+function createExplosionEffectObject() {
   const flash = new THREE.Mesh(
-    new THREE.SphereGeometry(0.45, 16, 12),
+    new THREE.SphereGeometry(0.45, 12, 8),
     new THREE.MeshBasicMaterial({ color: 0xffc857, transparent: true, opacity: 0.95 }),
   );
   const shockwave = new THREE.Mesh(
-    new THREE.RingGeometry(0.35, 0.55, 32),
+    new THREE.RingGeometry(0.35, 0.55, 24),
     new THREE.MeshBasicMaterial({ color: 0xff5d3f, transparent: true, opacity: 0.9, side: THREE.DoubleSide }),
   );
   shockwave.rotation.x = -Math.PI / 2;
   shockwave.position.y = -0.4;
   const effect = new THREE.Group();
   effect.add(flash, shockwave);
-  effect.position.copy(position);
-  effect.userData.life = 0.45;
-  scene.add(effect);
-  explosionEffects.push(effect);
+  return effect;
 }
 
 function explodeBarrel(barrel) {
@@ -212,6 +236,7 @@ function updateExplosionEffects(delta) {
     if (effect.userData.life <= 0) {
       scene.remove(effect);
       explosionEffects.splice(explosionEffects.indexOf(effect), 1);
+      explosionEffectPool.push(effect);
     }
   });
 }
@@ -262,7 +287,7 @@ function findEnemySpawnPosition() {
   const candidate = new THREE.Vector3();
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const angle = Math.random() * Math.PI * 2;
-    const distance = 14 + Math.random() * 9;
+    const distance = 18 + Math.random() * 11;
     candidate.set(
       Math.cos(angle) * distance,
       0,
@@ -515,7 +540,7 @@ function createArena() {
   floor.rotation.x = -Math.PI / 2;
   scene.add(floor);
 
-  const grid = new THREE.GridHelper(ARENA_SIZE, 30, 0x1b8cff, 0x12305c);
+  const grid = new THREE.GridHelper(ARENA_SIZE, 40, 0x1b8cff, 0x12305c);
   grid.position.y = 0.01;
   scene.add(grid);
 
@@ -533,9 +558,10 @@ function createArena() {
     roughness: 0.32,
   });
   const covers = [
-    { position: [-8, 1.2, 2], size: [5, 2.4, 1.1] },
-    { position: [8, 1.2, -4], size: [5, 2.4, 1.1] },
-    { position: [0, 1.1, -9], size: [1.2, 2.2, 5] },
+    { position: [-8, 1.2, 1], size: [5, 2.4, 1.1] },
+    { position: [8, 1.2, -1], size: [5, 2.4, 1.1] },
+    { position: [-2.5, 1.1, -8], size: [1.2, 2.2, 5] },
+    { position: [2.5, 1.1, 8], size: [1.2, 2.2, 4] },
   ];
   covers.forEach(({ position, size }) => {
     const cover = new THREE.Mesh(new THREE.BoxGeometry(...size), coverMaterial);
@@ -543,6 +569,86 @@ function createArena() {
     scene.add(cover);
     obstacles.push(cover);
   });
+
+  const outerCoverData = [
+    { position: [-22, 1.4, -2], size: [4.5, 2.8, 1.2], rotation: 0.12 },
+    { position: [22, 1.4, 3], size: [4.5, 2.8, 1.2], rotation: -0.16 },
+    { position: [-5, 1.25, -22], size: [1.2, 2.5, 4.5], rotation: 0.08 },
+    { position: [6, 1.25, 22], size: [1.2, 2.5, 4.5], rotation: -0.08 },
+    { position: [-22, 1, 16], size: [3.2, 2, 3.2], rotation: 0.35 },
+    { position: [22, 1, -15], size: [3.2, 2, 3.2], rotation: -0.35 },
+  ];
+  outerCoverData.forEach(({ position, size, rotation }) => {
+    const cover = new THREE.Mesh(new THREE.BoxGeometry(...size), coverMaterial);
+    cover.position.set(...position);
+    cover.rotation.y = rotation;
+    scene.add(cover);
+    obstacles.push(cover);
+  });
+
+  const laneMaterial = new THREE.MeshBasicMaterial({
+    color: 0x26c6ff,
+    transparent: true,
+    opacity: 0.28,
+  });
+  const dangerMaterial = new THREE.MeshBasicMaterial({
+    color: 0xff326e,
+    transparent: true,
+    opacity: 0.22,
+  });
+  [
+    { position: [-12, 0.025, 0], size: [7, 0.04, 0.16], rotation: 0 },
+    { position: [12, 0.025, 0], size: [7, 0.04, 0.16], rotation: 0 },
+    { position: [0, 0.025, -12], size: [0.16, 0.04, 7], rotation: 0 },
+    { position: [0, 0.025, 12], size: [0.16, 0.04, 7], rotation: 0 },
+  ].forEach(({ position, size, rotation }) => {
+    const lane = new THREE.Mesh(new THREE.BoxGeometry(...size), laneMaterial);
+    lane.position.set(...position);
+    lane.rotation.y = rotation;
+    scene.add(lane);
+  });
+  [
+    [-6, 0.03, 6],
+    [7, 0.03, 1],
+  ].forEach(([x, y, z]) => {
+    const hazard = new THREE.Mesh(
+      new THREE.CylinderGeometry(2.2, 2.2, 0.035, 32),
+      dangerMaterial,
+    );
+    hazard.position.set(x, y, z);
+    scene.add(hazard);
+  });
+
+  const core = new THREE.Group();
+  const coreBase = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.35, 1.55, 0.22, 24),
+    new THREE.MeshStandardMaterial({
+      color: 0x132d5b,
+      emissive: 0x083c7a,
+      emissiveIntensity: 2,
+      metalness: 0.8,
+      roughness: 0.24,
+    }),
+  );
+  const coreBeam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.28, 0.48, 2.4, 16),
+    new THREE.MeshBasicMaterial({
+      color: 0x58f0d0,
+      transparent: true,
+      opacity: 0.72,
+    }),
+  );
+  const coreRing = new THREE.Mesh(
+    new THREE.TorusGeometry(1.05, 0.045, 8, 32),
+    new THREE.MeshBasicMaterial({ color: 0xffc857 }),
+  );
+  coreBase.position.y = 0.12;
+  coreBeam.position.y = 1.25;
+  coreRing.rotation.x = Math.PI / 2;
+  coreRing.position.y = 0.46;
+  core.add(coreBase, coreBeam, coreRing);
+  core.position.set(0, 0, -1.5);
+  scene.add(core);
 
   const buildingMaterial = new THREE.MeshStandardMaterial({
     color: 0x182b50,
@@ -893,8 +999,8 @@ function fireEnemyProjectile(enemy) {
   const target = camera.position.clone();
   if (!hasLineOfSight(origin, target)) return;
 
-  const projectile = new THREE.Mesh(
-    new THREE.SphereGeometry(0.13, 10, 8),
+  const projectile = enemyProjectilePool.pop() || new THREE.Mesh(
+    new THREE.SphereGeometry(0.13, 8, 6),
     new THREE.MeshBasicMaterial({ color: 0xffc857 }),
   );
   projectile.position.copy(origin);
@@ -915,6 +1021,7 @@ function removeEnemyProjectile(projectile) {
   scene.remove(projectile);
   const index = enemyProjectiles.indexOf(projectile);
   if (index >= 0) enemyProjectiles.splice(index, 1);
+  enemyProjectilePool.push(projectile);
 }
 
 function updateEnemyProjectiles(delta) {
@@ -936,12 +1043,18 @@ function updateEnemyProjectiles(delta) {
     if (projectile.position.distanceTo(camera.position) < 0.7) {
       player.health = Math.max(0, player.health - projectile.userData.damage);
       updateHud();
+      showDamageFeedback();
       removeEnemyProjectile(projectile);
       if (player.health === 0) endGame();
     } else if (projectile.userData.life <= 0) {
       removeEnemyProjectile(projectile);
     }
   });
+}
+
+function showDamageFeedback() {
+  document.body.classList.add("damage-flash");
+  window.setTimeout(() => document.body.classList.remove("damage-flash"), 140);
 }
 
 function shoot() {
@@ -1112,6 +1225,7 @@ function updateEnemies(delta, elapsed) {
       lastDamageAt = performance.now();
       player.health = Math.max(0, player.health - 10);
       updateHud();
+      showDamageFeedback();
       if (player.health === 0) endGame();
     }
   });
@@ -1194,8 +1308,11 @@ function drawMinimap() {
 function resetGame() {
   enemies.splice(0).forEach((enemy) => scene.remove(enemy));
   explosiveBarrels.slice().forEach((barrel) => removeExplosiveBarrel(barrel));
-  explosionEffects.splice(0).forEach((effect) => scene.remove(effect));
-  enemyProjectiles.splice(0).forEach((projectile) => scene.remove(projectile));
+  explosionEffects.splice(0).forEach((effect) => {
+    scene.remove(effect);
+    explosionEffectPool.push(effect);
+  });
+  enemyProjectiles.slice().forEach((projectile) => removeEnemyProjectile(projectile));
   ammoPickups.splice(0).forEach((pickup) => scene.remove(pickup));
   player.health = 100;
   player.score = 0;
@@ -1327,7 +1444,7 @@ renderer.domElement.addEventListener("click", () => {
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  updateRenderQuality();
 });
 
 createArena();
