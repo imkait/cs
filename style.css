@@ -214,6 +214,15 @@ button:hover {
   font-size: 0.8rem;
 }
 
+.credit {
+  font-size: 0.72rem;
+  opacity: 0.7;
+}
+
+.credit a {
+  color: #58f0d0;
+}
+
 #notice {
   position: fixed;
   z-index: 2;

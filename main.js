@@ -2,14 +2,15 @@ import * as THREE from "three";
 import { GLTFLoader } from "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/loaders/GLTFLoader.js";
 import { FBXLoader } from "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/loaders/FBXLoader.js";
 import * as SkeletonUtils from "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/utils/SkeletonUtils.js";
+import { loadArenaMap } from "./map.js";
 
-const ARENA_SIZE = 64;
 const PLAYER_HEIGHT = 1.7;
+const PLAYER_RADIUS = 0.33;
+const ENEMY_RADIUS = 0.5;
 const PLAYER_SPEED = 7;
 const ENEMY_SPEED = 1.5;
 const ENEMY_STOP_DISTANCE = 7;
 const ENEMY_DETECTION_DISTANCE = 14;
-const ENEMY_WANDER_RADIUS = 14;
 const ENEMY_DAMAGE_COOLDOWN = 800;
 const ENEMY_FIRE_COOLDOWN = 1800;
 const ENEMY_PROJECTILE_SPEED = 12;
@@ -36,16 +37,16 @@ document.addEventListener("mouseup", (event) => {
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x050816);
-scene.fog = new THREE.Fog(0x050816, 22, 68);
+scene.fog = new THREE.Fog(0x050816, 55, 210);
 
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 140);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 420);
 camera.position.set(0, PLAYER_HEIGHT, 9);
 camera.layers.enable(1);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMappingExposure = 1.15;
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 scene.add(camera);
@@ -59,13 +60,22 @@ function updateRenderQuality() {
 
 updateRenderQuality();
 
-scene.add(new THREE.HemisphereLight(0x8db7ff, 0x12091e, 1.8));
-const blueLight = new THREE.PointLight(0x26c6ff, 30, 25);
-blueLight.position.set(-8, 5, 0);
+scene.add(new THREE.HemisphereLight(0x8db7ff, 0x12091e, 3.2));
+const sunLight = new THREE.DirectionalLight(0xdce8ff, 2.4);
+sunLight.position.set(28, 46, 18);
+scene.add(sunLight);
+const fillLight = new THREE.DirectionalLight(0x7f9dff, 0.8);
+fillLight.position.set(-32, 24, -26);
+scene.add(fillLight);
+const blueLight = new THREE.PointLight(0x26c6ff, 30, 28);
+blueLight.position.set(-10, 5, 0);
 scene.add(blueLight);
-const pinkLight = new THREE.PointLight(0xff32a6, 25, 22);
-pinkLight.position.set(8, 4, -7);
+const pinkLight = new THREE.PointLight(0xff32a6, 25, 26);
+pinkLight.position.set(10, 4, -8);
 scene.add(pinkLight);
+
+let arenaMap = null;
+let minimapBackground = null;
 
 const player = {
   health: 100,
@@ -78,7 +88,6 @@ const player = {
 
 const keys = new Set();
 const enemies = [];
-const obstacles = [];
 const explosiveBarrels = [];
 const explosionEffects = [];
 const explosionEffectPool = [];
@@ -91,8 +100,6 @@ const clock = new THREE.Clock();
 const gltfLoader = new GLTFLoader();
 const fbxLoader = new FBXLoader();
 const textureLoader = new THREE.TextureLoader();
-const kenneyBuildingModels = [];
-const kenneyCarModels = [];
 const blasterModels = [];
 let kenneyEnemyModel;
 let kenneyEnemyAnimations = [];
@@ -151,15 +158,12 @@ function createExplosiveBarrel(position) {
   });
   scene.add(barrel);
   explosiveBarrels.push(barrel);
-  obstacles.push(barrel);
 }
 
 function removeExplosiveBarrel(barrel) {
   scene.remove(barrel);
   const barrelIndex = explosiveBarrels.indexOf(barrel);
   if (barrelIndex >= 0) explosiveBarrels.splice(barrelIndex, 1);
-  const obstacleIndex = obstacles.indexOf(barrel);
-  if (obstacleIndex >= 0) obstacles.splice(obstacleIndex, 1);
 }
 
 function createExplosionEffect(position) {
@@ -262,106 +266,25 @@ function fitEnemyModel(model, height) {
   model.position.y -= fittedBounds.min.y;
 }
 
-function addImportedBuilding(source, position, size, rotation = 0) {
-  const building = source.clone(true);
-  fitModel(building, size);
-  const bounds = new THREE.Box3().setFromObject(building);
-  building.position.set(position[0], position[1] - bounds.min.y, position[2]);
-  building.rotation.y = rotation;
-  scene.add(building);
-  obstacles.push(building);
-  relocateEnemiesOutsideObstacles();
-}
-
-function addImportedCar(source, position, rotation = 0, size = [4.8, 2.2, 2.6]) {
-  const car = source.clone(true);
-  fitModel(car, size);
-  const bounds = new THREE.Box3().setFromObject(car);
-  car.position.set(position[0], position[1] - bounds.min.y, position[2]);
-  car.rotation.y = rotation;
-  scene.add(car);
-  obstacles.push(car);
-}
-
 function findEnemySpawnPosition() {
-  const candidate = new THREE.Vector3();
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const angle = Math.random() * Math.PI * 2;
-    const distance = 18 + Math.random() * 11;
-    candidate.set(
-      Math.cos(angle) * distance,
-      0,
-      Math.sin(angle) * distance,
-    );
+  if (!arenaMap) return new THREE.Vector3(0, 0, -20);
+  for (let attempt = 0; attempt < 160; attempt += 1) {
+    const candidate = arenaMap.randomWalkablePoint(0.7, {
+      avoid: camera.position,
+      minDistance: 13,
+    });
     if (
-      candidate.distanceTo(camera.position) >= 12 &&
-      !collidesWithObstacle(candidate, 1.2)
+      candidate
+      && candidate.distanceTo(camera.position) >= 13
+      && arenaMap.canStand(candidate.x, candidate.z, 0.5)
     ) {
-      return candidate.clone();
+      return candidate;
     }
   }
-  return new THREE.Vector3(0, 0, -20);
-}
-
-function relocateEnemiesOutsideObstacles() {
-  enemies.forEach((enemy) => {
-    if (collidesWithObstacle(enemy.position, 1.2)) {
-      enemy.position.copy(findEnemySpawnPosition());
-    }
-  });
+  return arenaMap.randomWalkablePoint(0.7) || new THREE.Vector3(0, 0, -20);
 }
 
 function loadGameAssets() {
-  loadModel("./assets/kenney/city-kit-industrial/building-a.glb", (model) => {
-    kenneyBuildingModels[0] = model;
-    addImportedBuilding(model, [-17, 0, -14], [8, 8, 7]);
-    addImportedBuilding(model, [-17, 0, 14], [9, 7, 6]);
-  }, "Kenney building-a");
-  loadModel("./assets/kenney/city-kit-industrial/building-e.glb", (model) => {
-    kenneyBuildingModels[1] = model;
-    addImportedBuilding(model, [15, 0, -16], [7, 10, 8]);
-    addImportedBuilding(model, [17, 0, 13], [8, 9, 7]);
-  }, "Kenney building-e");
-  loadModel("./assets/kenney/city-kit-industrial/shipping-container-a.glb", (model) => {
-    kenneyBuildingModels[2] = model;
-    addImportedBuilding(model, [0, 0, -9], [5, 2.8, 2.3], Math.PI / 2);
-  }, "Kenney shipping-container-a");
-  loadModel(
-    "./assets/kenney/city-kit-commercial/Models/GLB format/building-a.glb",
-    (model) => {
-      addImportedBuilding(model, [-19, 0, 0], [7, 9, 7], Math.PI / 2);
-      addImportedBuilding(model, [19, 0, 0], [7, 8, 7], -Math.PI / 2);
-    },
-    "Kenney commercial building-a",
-  );
-  loadModel(
-    "./assets/kenney/city-kit-commercial/Models/GLB format/building-f.glb",
-    (model) => {
-      addImportedBuilding(model, [-12, 0, -19], [8, 7, 7]);
-      addImportedBuilding(model, [12, 0, 19], [8, 7, 7], Math.PI);
-    },
-    "Kenney commercial building-f",
-  );
-  loadModel(
-    "./assets/kenney/city-kit-commercial/Models/GLB format/building-skyscraper-a.glb",
-    (model) => {
-      addImportedBuilding(model, [19, 0, 19], [7, 15, 7], Math.PI);
-    },
-    "Kenney commercial skyscraper-a",
-  );
-  loadModel("./assets/kenney/car-kit/sedan.glb", (model) => {
-    kenneyCarModels[0] = model;
-    addImportedCar(model, [-10, 0, -3], 0.2);
-    addImportedCar(model, [-3, 0, 14], Math.PI / 2);
-  }, "Kenney sedan");
-  loadModel("./assets/kenney/car-kit/suv.glb", (model) => {
-    kenneyCarModels[1] = model;
-    addImportedCar(model, [11, 0, 6], -0.5, [5.4, 2.2, 2.9]);
-  }, "Kenney SUV");
-  loadModel("./assets/kenney/car-kit/race-future.glb", (model) => {
-    kenneyCarModels[2] = model;
-    addImportedCar(model, [5, 0, -14], Math.PI / 2);
-  }, "Kenney future race car");
   fbxLoader.load(
     "./assets/animated-characters-survivors/Model/characterMedium.fbx",
     (model) => {
@@ -525,6 +448,7 @@ const waveElement = document.querySelector("#wave");
 const weaponNameElement = document.querySelector("#weapon-name");
 const ammoCountElement = document.querySelector("#ammo-count");
 const startScreen = document.querySelector("#start-screen");
+const startButton = document.querySelector("#start-button");
 const gameOverScreen = document.querySelector("#game-over-screen");
 const pauseScreen = document.querySelector("#pause-screen");
 const finalScoreElement = document.querySelector("#final-score");
@@ -532,169 +456,81 @@ const noticeElement = document.querySelector("#notice");
 const minimap = document.querySelector("#minimap");
 const minimapContext = minimap.getContext("2d");
 
-function createArena() {
-  const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(ARENA_SIZE, ARENA_SIZE),
-    new THREE.MeshStandardMaterial({ color: 0x0b1630, metalness: 0.6, roughness: 0.55 }),
+function createArenaBackdrop() {
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(600, 600),
+    new THREE.MeshStandardMaterial({ color: 0x080d1c, roughness: 1, metalness: 0.08 }),
   );
-  floor.rotation.x = -Math.PI / 2;
-  scene.add(floor);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.06;
+  scene.add(ground);
+}
 
-  const grid = new THREE.GridHelper(ARENA_SIZE, 40, 0x1b8cff, 0x12305c);
-  grid.position.y = 0.01;
-  scene.add(grid);
+function createArenaAccents(map) {
+  const { bounds } = map;
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(1.15, 0.035, 8, 48),
+    new THREE.MeshBasicMaterial({ color: 0x58f0d0 }),
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.copy(map.spawnPoint).setY(map.spawnPoint.y + 0.04);
+  scene.add(ring);
 
-  const wallMaterial = new THREE.MeshStandardMaterial({
-    color: 0x101d45,
-    emissive: 0x07183d,
-    emissiveIntensity: 1.6,
-    metalness: 0.4,
-  });
-  const coverMaterial = new THREE.MeshStandardMaterial({
-    color: 0x1b3d68,
-    emissive: 0x0c2e5b,
-    emissiveIntensity: 1.8,
-    metalness: 0.65,
-    roughness: 0.32,
-  });
-  const covers = [
-    { position: [-8, 1.2, 1], size: [5, 2.4, 1.1] },
-    { position: [8, 1.2, -1], size: [5, 2.4, 1.1] },
-    { position: [-2.5, 1.1, -8], size: [1.2, 2.2, 5] },
-    { position: [2.5, 1.1, 8], size: [1.2, 2.2, 4] },
-  ];
-  covers.forEach(({ position, size }) => {
-    const cover = new THREE.Mesh(new THREE.BoxGeometry(...size), coverMaterial);
-    cover.position.set(...position);
-    scene.add(cover);
-    obstacles.push(cover);
-  });
-
-  const outerCoverData = [
-    { position: [-22, 1.4, -2], size: [4.5, 2.8, 1.2], rotation: 0.12 },
-    { position: [22, 1.4, 3], size: [4.5, 2.8, 1.2], rotation: -0.16 },
-    { position: [-5, 1.25, -22], size: [1.2, 2.5, 4.5], rotation: 0.08 },
-    { position: [6, 1.25, 22], size: [1.2, 2.5, 4.5], rotation: -0.08 },
-    { position: [-22, 1, 16], size: [3.2, 2, 3.2], rotation: 0.35 },
-    { position: [22, 1, -15], size: [3.2, 2, 3.2], rotation: -0.35 },
-  ];
-  outerCoverData.forEach(({ position, size, rotation }) => {
-    const cover = new THREE.Mesh(new THREE.BoxGeometry(...size), coverMaterial);
-    cover.position.set(...position);
-    cover.rotation.y = rotation;
-    scene.add(cover);
-    obstacles.push(cover);
-  });
-
-  const laneMaterial = new THREE.MeshBasicMaterial({
-    color: 0x26c6ff,
-    transparent: true,
-    opacity: 0.28,
-  });
-  const dangerMaterial = new THREE.MeshBasicMaterial({
-    color: 0xff326e,
-    transparent: true,
-    opacity: 0.22,
-  });
+  const cornerMaterialA = new THREE.MeshBasicMaterial({ color: 0x26c6ff });
+  const cornerMaterialB = new THREE.MeshBasicMaterial({ color: 0xff32a6 });
   [
-    { position: [-12, 0.025, 0], size: [7, 0.04, 0.16], rotation: 0 },
-    { position: [12, 0.025, 0], size: [7, 0.04, 0.16], rotation: 0 },
-    { position: [0, 0.025, -12], size: [0.16, 0.04, 7], rotation: 0 },
-    { position: [0, 0.025, 12], size: [0.16, 0.04, 7], rotation: 0 },
-  ].forEach(({ position, size, rotation }) => {
-    const lane = new THREE.Mesh(new THREE.BoxGeometry(...size), laneMaterial);
-    lane.position.set(...position);
-    lane.rotation.y = rotation;
-    scene.add(lane);
-  });
-  [
-    [-6, 0.03, 6],
-    [7, 0.03, 1],
-  ].forEach(([x, y, z]) => {
-    const hazard = new THREE.Mesh(
-      new THREE.CylinderGeometry(2.2, 2.2, 0.035, 32),
-      dangerMaterial,
-    );
-    hazard.position.set(x, y, z);
-    scene.add(hazard);
+    [bounds.minX + 0.6, bounds.minZ + 0.6, cornerMaterialA],
+    [bounds.maxX - 0.6, bounds.minZ + 0.6, cornerMaterialB],
+    [bounds.minX + 0.6, bounds.maxZ - 0.6, cornerMaterialB],
+    [bounds.maxX - 0.6, bounds.maxZ - 0.6, cornerMaterialA],
+  ].forEach(([x, z, material]) => {
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 2.6, 6), material);
+    post.position.set(x, map.groundAt(x, z) + 1.3, z);
+    scene.add(post);
   });
 
-  const core = new THREE.Group();
-  const coreBase = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.35, 1.55, 0.22, 24),
-    new THREE.MeshStandardMaterial({
-      color: 0x132d5b,
-      emissive: 0x083c7a,
-      emissiveIntensity: 2,
-      metalness: 0.8,
-      roughness: 0.24,
-    }),
-  );
-  const coreBeam = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.28, 0.48, 2.4, 16),
-    new THREE.MeshBasicMaterial({
-      color: 0x58f0d0,
-      transparent: true,
-      opacity: 0.72,
-    }),
-  );
-  const coreRing = new THREE.Mesh(
-    new THREE.TorusGeometry(1.05, 0.045, 8, 32),
-    new THREE.MeshBasicMaterial({ color: 0xffc857 }),
-  );
-  coreBase.position.y = 0.12;
-  coreBeam.position.y = 1.25;
-  coreRing.rotation.x = Math.PI / 2;
-  coreRing.position.y = 0.46;
-  core.add(coreBase, coreBeam, coreRing);
-  core.position.set(0, 0, -1.5);
-  scene.add(core);
+  blueLight.position.set(bounds.minX + 4, 6, bounds.minZ + 4);
+  pinkLight.position.set(bounds.maxX - 4, 5, bounds.maxZ - 4);
+}
 
-  const buildingMaterial = new THREE.MeshStandardMaterial({
-    color: 0x182b50,
-    emissive: 0x091b3a,
-    emissiveIntensity: 1.5,
-    metalness: 0.45,
-    roughness: 0.55,
-  });
-  const buildingData = [
-    { position: [-17, 4, -14], size: [8, 8, 7] },
-    { position: [15, 5, -16], size: [7, 10, 8] },
-    { position: [-17, 3.5, 14], size: [9, 7, 6] },
-    { position: [17, 4.5, 13], size: [8, 9, 7] },
-  ];
-  buildingData.forEach(({ position, size }, index) => {
-    const building = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.BoxGeometry(...size), buildingMaterial);
-    building.add(body);
-    const windowMaterial = new THREE.MeshBasicMaterial({ color: index % 2 ? 0xff32a6 : 0x26c6ff });
-    for (let row = 0; row < 3; row += 1) {
-      const windows = new THREE.Mesh(new THREE.BoxGeometry(size[0] * 0.65, 0.08, 0.08), windowMaterial);
-      windows.position.set(0, -size[1] * 0.25 + row * 1.4, size[2] / 2 + 0.05);
-      building.add(windows);
-    }
-    building.position.set(...position);
-    scene.add(building);
-    obstacles.push(building);
-  });
+async function setupArenaMap() {
+  createArenaBackdrop();
+  startScreen.classList.remove("hidden");
+  startButton.disabled = true;
+  startButton.textContent = "載入地圖中…";
 
-  for (let i = 0; i < 10; i += 1) {
-    const pillar = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.18, 0.18, 2.4, 8),
-      new THREE.MeshBasicMaterial({ color: i % 2 ? 0xff32a6 : 0x26c6ff }),
-    );
-    const angle = (i / 10) * Math.PI * 2;
-    pillar.position.set(Math.cos(angle) * 11, 1.2, Math.sin(angle) * 11);
-    scene.add(pillar);
+  try {
+    arenaMap = await loadArenaMap({
+      onProgress: (progress) => {
+        startButton.textContent = `載入地圖中… ${Math.round(progress * 100)}%`;
+      },
+    });
+    scene.add(arenaMap.root);
+    minimapBackground = arenaMap.createMinimapBackground(minimap.width);
+    createArenaAccents(arenaMap);
+    moveCameraToSpawn();
+    startButton.disabled = false;
+    startButton.textContent = "開始遊戲";
+    noticeElement.textContent = "地圖載入完成，點擊「開始遊戲」鎖定滑鼠";
+  } catch (error) {
+    console.warn("地圖載入失敗", error);
+    startButton.textContent = "地圖載入失敗";
+    noticeElement.textContent = "地圖載入失敗，請確認 arena_standoff_2.glb 是否存在";
   }
+}
 
-  const ringMaterial = new THREE.MeshBasicMaterial({ color: 0x7d4dff, transparent: true, opacity: 0.8 });
-  [4, 8, 12].forEach((radius, index) => {
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.025, 8, 64), ringMaterial);
-    ring.rotation.x = Math.PI / 2;
-    ring.position.y = 0.04 + index * 0.01;
-    scene.add(ring);
-  });
+function moveCameraToSpawn() {
+  if (!arenaMap) return;
+  const spawn = arenaMap.spawnPoint;
+  player.yaw = aimYawFromSpawn();
+  player.pitch = 0;
+  camera.position.set(spawn.x, spawn.y + PLAYER_HEIGHT, spawn.z);
+  camera.rotation.set(0, player.yaw, 0, "YXZ");
+}
+
+function aimYawFromSpawn() {
+  if (!arenaMap) return 0;
+  return arenaMap.spawnYaw ?? 0;
 }
 
 function createAmmoPickup(position) {
@@ -957,12 +793,11 @@ function createEnemy() {
   enemy.userData.lastShotAt = performance.now() + Math.random() * ENEMY_FIRE_COOLDOWN;
   enemy.userData.attackUntil = 0;
   enemy.userData.hitUntil = 0;
-  enemy.userData.wanderTarget = new THREE.Vector3(
-    THREE.MathUtils.randFloat(-ENEMY_WANDER_RADIUS, ENEMY_WANDER_RADIUS),
-    0,
-    THREE.MathUtils.randFloat(-ENEMY_WANDER_RADIUS, ENEMY_WANDER_RADIUS),
-  );
+  enemy.userData.wanderTarget = arenaMap
+    ? arenaMap.randomWalkablePoint(0.7)
+    : new THREE.Vector3(0, 0, 0);
   enemy.userData.wanderUntil = performance.now() + THREE.MathUtils.randFloat(1800, 4200);
+  enemy.userData.stuckTime = 0;
   if (enemy.userData.proceduralAnimation) {
     enemy.userData.proceduralAnimation.state = "idle";
   }
@@ -985,12 +820,8 @@ function removeEnemy(enemy) {
 }
 
 function hasLineOfSight(from, to) {
-  const direction = to.clone().sub(from);
-  const distance = direction.length();
-  direction.normalize();
-  raycaster.set(from, direction);
-  const hits = raycaster.intersectObjects(obstacles, true);
-  return hits.length === 0 || hits[0].distance > distance;
+  if (!arenaMap) return true;
+  return !arenaMap.segmentBlocked(from.x, from.z, to.x, to.z);
 }
 
 function fireEnemyProjectile(enemy) {
@@ -1028,14 +859,17 @@ function updateEnemyProjectiles(delta) {
   enemyProjectiles.slice().forEach((projectile) => {
     const movement = projectile.userData.velocity.clone().multiplyScalar(delta);
     const nextPosition = projectile.position.clone().add(movement);
-    const from = projectile.position.clone();
-    const direction = movement.clone().normalize();
-    raycaster.set(from, direction);
-    const wallHits = raycaster.intersectObjects(obstacles, true);
-    const wallHit = wallHits.find((hit) => hit.distance <= movement.length());
-    if (wallHit) {
-      removeEnemyProjectile(projectile);
-      return;
+    if (arenaMap) {
+      const blockedAt = arenaMap.rayBlockedDistance(
+        projectile.position.x,
+        projectile.position.z,
+        nextPosition.x,
+        nextPosition.z,
+      );
+      if (blockedAt !== null && blockedAt <= movement.length()) {
+        removeEnemyProjectile(projectile);
+        return;
+      }
     }
 
     projectile.position.copy(nextPosition);
@@ -1090,20 +924,38 @@ function shoot() {
     .filter(Boolean)
     .sort((a, b) => a.distance - b.distance);
   const barrelHits = raycaster.intersectObjects(explosiveBarrels, true);
-  const obstacleHits = raycaster.intersectObjects(obstacles, true);
   const barrelHit = barrelHits[0];
-  const obstacleHit = obstacleHits.find((hit) => !hit.object.userData.barrel);
-  if (barrelHit && (!obstacleHit || barrelHit.distance <= obstacleHit.distance)) {
+  const enemyHitDistance = Math.min(
+    hitboxHits[0]?.distance ?? Infinity,
+    enemyHits[0]?.distance ?? Infinity,
+  );
+  const barrelDistance = barrelHit ? barrelHit.distance : Infinity;
+
+  let wallDistance = Infinity;
+  if (arenaMap) {
+    const direction = raycaster.ray.direction;
+    const horizontal = Math.hypot(direction.x, direction.z);
+    if (horizontal > 1e-4) {
+      const origin = raycaster.ray.origin;
+      const blocked = arenaMap.rayBlockedDistance(
+        origin.x,
+        origin.z,
+        origin.x + (direction.x / horizontal) * 240,
+        origin.z + (direction.z / horizontal) * 240,
+      );
+      if (blocked !== null) wallDistance = blocked / horizontal;
+    }
+  }
+
+  if (barrelHit && barrelDistance <= wallDistance && barrelDistance <= enemyHitDistance) {
     explodeBarrel(barrelHit.object.userData.barrel);
     return;
   }
-  if (enemyHits.length === 0 && hitboxHits.length === 0) return;
-  const closestEnemyHit = hitboxHits[0];
-  if (obstacleHit && closestEnemyHit && obstacleHit.distance < closestEnemyHit.distance) return;
+  if (enemyHitDistance === Infinity || enemyHitDistance > wallDistance) return;
 
-  const enemy = closestEnemyHit?.enemy
-    || enemyHits[0].object.userData.enemy
-    || enemyHits[0].object.parent;
+  const enemy = hitboxHits[0]?.enemy
+    || enemyHits[0]?.object.userData.enemy
+    || enemyHits[0]?.object.parent;
   if (!enemy || !enemy.userData.health) return;
   enemy.userData.health = Math.max(0, enemy.userData.health - selectedWeapon.damage);
   if (enemy.userData.proceduralAnimation) {
@@ -1140,21 +992,100 @@ function updatePlayer(delta) {
 
   const movement = direction.multiplyScalar(PLAYER_SPEED * delta);
   movement.applyAxisAngle(new THREE.Vector3(0, 1, 0), player.yaw);
-  const nextPosition = camera.position.clone().add(movement);
-  if (!collidesWithObstacle(nextPosition, 0.45)) {
-    camera.position.copy(nextPosition);
+  movePlayerWithSlide(movement);
+  if (arenaMap) {
+    camera.position.y = arenaMap.groundAt(camera.position.x, camera.position.z) + PLAYER_HEIGHT;
+  } else {
+    camera.position.y = PLAYER_HEIGHT;
   }
-  camera.position.x = THREE.MathUtils.clamp(camera.position.x, -ARENA_SIZE / 2 + 1, ARENA_SIZE / 2 - 1);
-  camera.position.z = THREE.MathUtils.clamp(camera.position.z, -ARENA_SIZE / 2 + 1, ARENA_SIZE / 2 - 1);
-  camera.position.y = PLAYER_HEIGHT;
+}
+
+/** 玩家撞牆時沿牆面切線滑行，避免在牆角或窄縫前卡住 */
+function movePlayerWithSlide(movement) {
+  // 拆成小步，斜向貼牆時才不會整步被擋掉
+  const steps = Math.max(1, Math.ceil(movement.length() / 0.08));
+  const step = movement.clone().divideScalar(steps);
+  for (let i = 0; i < steps; i += 1) {
+    if (!movePlayerStep(step)) break;
+  }
+}
+
+function movePlayerStep(step) {
+  const nextPosition = camera.position.clone().add(step);
+  if (!collidesWithObstacle(nextPosition, PLAYER_RADIUS)) {
+    camera.position.copy(nextPosition);
+    return true;
+  }
+
+  // 沿最近牆面的切線滑行（牆面是斜的也能順著滑進窄縫）
+  if (arenaMap) {
+    const wall = arenaMap.nearestWall(camera.position.x, camera.position.z, 1.2);
+    if (wall) {
+      const tangentX = -wall.nz;
+      const tangentZ = wall.nx;
+      const along = step.x * tangentX + step.z * tangentZ;
+      if (Math.abs(along) > 1e-4) {
+        const slid = camera.position.clone();
+        slid.x += tangentX * along;
+        slid.z += tangentZ * along;
+        if (!collidesWithObstacle(slid, PLAYER_RADIUS)) {
+          camera.position.copy(slid);
+          return true;
+        }
+      }
+    }
+  }
+
+  const slideX = camera.position.clone();
+  slideX.x += step.x;
+  if (!collidesWithObstacle(slideX, PLAYER_RADIUS)) {
+    camera.position.copy(slideX);
+    return true;
+  }
+  const slideZ = camera.position.clone();
+  slideZ.z += step.z;
+  if (!collidesWithObstacle(slideZ, PLAYER_RADIUS)) {
+    camera.position.copy(slideZ);
+    return true;
+  }
+  return false;
 }
 
 function collidesWithObstacle(position, radius) {
-  return obstacles.some((obstacle) => {
-    const bounds = new THREE.Box3().setFromObject(obstacle);
-    bounds.expandByScalar(radius);
-    return bounds.containsPoint(new THREE.Vector3(position.x, 1, position.z));
+  const x = position.x;
+  const z = position.z;
+  if (arenaMap) {
+    if (!arenaMap.canStand(x, z, radius)) return true;
+  }
+  return explosiveBarrels.some((barrel) => {
+    const dx = barrel.position.x - x;
+    const dz = barrel.position.z - z;
+    return Math.hypot(dx, dz) < radius + 0.45;
   });
+}
+
+/** 敵人移動遇牆時嘗試單軸滑動，避免卡在轉角 */
+function moveEnemyWithSlide(enemy, stepX, stepZ) {
+  const radius = ENEMY_RADIUS;
+  const tryMove = (dx, dz) => {
+    if (Math.abs(dx) + Math.abs(dz) < 1e-5) return false;
+    const position = { x: enemy.position.x + dx, z: enemy.position.z + dz };
+    if (collidesWithObstacle(position, radius)) return false;
+    enemy.position.x = position.x;
+    enemy.position.z = position.z;
+    return true;
+  };
+  if (tryMove(stepX, stepZ)) return true;
+  if (arenaMap) {
+    const wall = arenaMap.nearestWall(enemy.position.x, enemy.position.z, 1.2);
+    if (wall) {
+      const tangentX = -wall.nz;
+      const tangentZ = wall.nx;
+      const along = stepX * tangentX + stepZ * tangentZ;
+      if (tryMove(tangentX * along, tangentZ * along)) return true;
+    }
+  }
+  return tryMove(stepX, 0) || tryMove(0, stepZ);
 }
 
 function updateEnemies(delta, elapsed) {
@@ -1166,11 +1097,9 @@ function updateEnemies(delta, elapsed) {
     const now = performance.now();
     const isChasing = distance <= ENEMY_DETECTION_DISTANCE;
     if (!isChasing && now >= enemy.userData.wanderUntil) {
-      enemy.userData.wanderTarget.set(
-        THREE.MathUtils.randFloat(-ENEMY_WANDER_RADIUS, ENEMY_WANDER_RADIUS),
-        0,
-        THREE.MathUtils.randFloat(-ENEMY_WANDER_RADIUS, ENEMY_WANDER_RADIUS),
-      );
+      enemy.userData.wanderTarget = arenaMap
+        ? arenaMap.randomWalkablePoint(0.7)
+        : new THREE.Vector3(0, 0, 0);
       enemy.userData.wanderUntil = now + THREE.MathUtils.randFloat(1800, 4200);
     }
     const movementTarget = isChasing
@@ -1179,15 +1108,22 @@ function updateEnemies(delta, elapsed) {
     const direction = movementTarget.clone().sub(enemy.position);
     direction.y = 0;
     const targetDistance = direction.length();
-    const nextPosition = enemy.position.clone();
     let moved = false;
     if ((isChasing && distance > ENEMY_STOP_DISTANCE) || (!isChasing && targetDistance > 0.4)) {
       direction.normalize();
-      nextPosition.addScaledVector(direction, ENEMY_SPEED * delta);
+      moved = moveEnemyWithSlide(
+        enemy,
+        direction.x * ENEMY_SPEED * delta,
+        direction.z * ENEMY_SPEED * delta,
+      );
     }
-    if (!collidesWithObstacle(nextPosition, 0.75)) {
-      enemy.position.copy(nextPosition);
-      moved = true;
+    enemy.userData.stuckTime = moved ? 0 : enemy.userData.stuckTime + delta;
+    if (!isChasing && enemy.userData.stuckTime > 2) {
+      enemy.userData.stuckTime = 0;
+      enemy.userData.wanderTarget = arenaMap
+        ? arenaMap.randomWalkablePoint(0.7)
+        : new THREE.Vector3(0, 0, 0);
+      enemy.userData.wanderUntil = now + THREE.MathUtils.randFloat(1800, 4200);
     }
     if (moved) {
       enemy.lookAt(
@@ -1196,7 +1132,11 @@ function updateEnemies(delta, elapsed) {
         movementTarget.z,
       );
     }
-    enemy.position.y = 0;
+    if (arenaMap) {
+      enemy.position.y = arenaMap.groundAt(enemy.position.x, enemy.position.z);
+    } else {
+      enemy.position.y = 0;
+    }
     if (enemy.userData.proceduralAnimation) {
       if (performance.now() < enemy.userData.hitUntil) {
         enemy.userData.proceduralAnimation.state = "hit";
@@ -1244,37 +1184,37 @@ function updateHud() {
 function drawMinimap() {
   const width = minimap.width;
   const height = minimap.height;
-  const padding = 8;
-  const scale = (width - padding * 2) / ARENA_SIZE;
-  const toMap = (value) => value * scale + width / 2;
 
   minimapContext.clearRect(0, 0, width, height);
-  minimapContext.fillStyle = "#071126";
-  minimapContext.fillRect(0, 0, width, height);
-
-  minimapContext.strokeStyle = "rgba(77, 168, 255, 0.22)";
-  minimapContext.lineWidth = 1;
-  for (let grid = -20; grid <= 20; grid += 10) {
-    const position = toMap(grid);
-    minimapContext.beginPath();
-    minimapContext.moveTo(position, padding);
-    minimapContext.lineTo(position, height - padding);
-    minimapContext.moveTo(padding, position);
-    minimapContext.lineTo(width - padding, position);
-    minimapContext.stroke();
+  if (minimapBackground) {
+    minimapContext.drawImage(minimapBackground, 0, 0, width, height);
+  } else {
+    minimapContext.fillStyle = "#071126";
+    minimapContext.fillRect(0, 0, width, height);
   }
 
-  obstacles.forEach((obstacle) => {
-    const bounds = new THREE.Box3().setFromObject(obstacle);
-    const obstacleWidth = Math.max(4, (bounds.max.x - bounds.min.x) * scale);
-    const obstacleDepth = Math.max(4, (bounds.max.z - bounds.min.z) * scale);
-    minimapContext.fillStyle = "rgba(73, 118, 180, 0.72)";
-    minimapContext.fillRect(
-      toMap((bounds.min.x + bounds.max.x) / 2) - obstacleWidth / 2,
-      toMap((bounds.min.z + bounds.max.z) / 2) - obstacleDepth / 2,
-      obstacleWidth,
-      obstacleDepth,
-    );
+  let toMapX = (x) => x;
+  let toMapZ = (z) => z;
+  if (arenaMap) {
+    const { bounds } = arenaMap;
+    const span = Math.max(bounds.maxX - bounds.minX, bounds.maxZ - bounds.minZ);
+    const scale = (width - 12) / span;
+    const offsetX = width / 2 - ((bounds.minX + bounds.maxX) / 2) * scale;
+    const offsetZ = height / 2 - ((bounds.minZ + bounds.maxZ) / 2) * scale;
+    toMapX = (x) => x * scale + offsetX;
+    toMapZ = (z) => z * scale + offsetZ;
+  }
+
+  explosiveBarrels.forEach((barrel) => {
+    minimapContext.fillStyle = "#ffc857";
+    minimapContext.beginPath();
+    minimapContext.arc(toMapX(barrel.position.x), toMapZ(barrel.position.z), 3, 0, Math.PI * 2);
+    minimapContext.fill();
+  });
+
+  ammoPickups.forEach((pickup) => {
+    minimapContext.fillStyle = "#58f0d0";
+    minimapContext.fillRect(toMapX(pickup.position.x) - 2, toMapZ(pickup.position.z) - 2, 4, 4);
   });
 
   enemies.forEach((enemy) => {
@@ -1285,27 +1225,60 @@ function drawMinimap() {
     minimapContext.shadowColor = "#ff3f87";
     minimapContext.shadowBlur = 8;
     minimapContext.beginPath();
-    minimapContext.arc(toMap(enemy.position.x), toMap(enemy.position.z), 4, 0, Math.PI * 2);
+    minimapContext.arc(toMapX(enemy.position.x), toMapZ(enemy.position.z), 4, 0, Math.PI * 2);
     minimapContext.fill();
   });
 
   minimapContext.shadowBlur = 0;
   minimapContext.fillStyle = "#58f0d0";
   minimapContext.beginPath();
-  minimapContext.arc(toMap(camera.position.x), toMap(camera.position.z), 5, 0, Math.PI * 2);
+  minimapContext.arc(toMapX(camera.position.x), toMapZ(camera.position.z), 5, 0, Math.PI * 2);
   minimapContext.fill();
   minimapContext.strokeStyle = "#58f0d0";
   minimapContext.lineWidth = 2;
   minimapContext.beginPath();
-  minimapContext.moveTo(toMap(camera.position.x), toMap(camera.position.z));
+  minimapContext.moveTo(toMapX(camera.position.x), toMapZ(camera.position.z));
   minimapContext.lineTo(
-    toMap(camera.position.x - Math.sin(player.yaw) * 1.8),
-    toMap(camera.position.z - Math.cos(player.yaw) * 1.8),
+    toMapX(camera.position.x - Math.sin(player.yaw) * 1.8),
+    toMapZ(camera.position.z - Math.cos(player.yaw) * 1.8),
   );
   minimapContext.stroke();
 }
 
+function placeBarrels() {
+  const spots = [];
+  for (let i = 0; i < 8 && spots.length < 4; i += 1) {
+    // 只放在空曠處，避免爆炸桶把窄通道整個堵住
+    const point = arenaMap.randomWalkablePoint(1.1, {
+      avoid: arenaMap.spawnPoint,
+      minDistance: 7,
+    });
+    if (point.distanceTo(arenaMap.spawnPoint) < 6) continue;
+    if (!arenaMap.canStand(point.x, point.z, 0.5)) continue;
+    const tooClose = spots.some((spot) => spot.distanceTo(point) < 7);
+    if (tooClose) continue;
+    spots.push(point);
+    createExplosiveBarrel([point.x, point.y + 0.6, point.z]);
+  }
+}
+
+function placeAmmoPickups() {
+  const spots = [];
+  for (let i = 0; i < 4; i += 1) {
+    const point = arenaMap.randomWalkablePoint(0.8, {
+      avoid: arenaMap.spawnPoint,
+      minDistance: 5,
+    });
+    if (!arenaMap.canStand(point.x, point.z, 0.4)) continue;
+    const tooClose = spots.some((spot) => spot.distanceTo(point) < 6);
+    if (tooClose) continue;
+    spots.push(point);
+    createAmmoPickup([point.x, point.y + 0.5, point.z]);
+  }
+}
+
 function resetGame() {
+  if (!arenaMap) return;
   enemies.splice(0).forEach((enemy) => scene.remove(enemy));
   explosiveBarrels.slice().forEach((barrel) => removeExplosiveBarrel(barrel));
   explosionEffects.splice(0).forEach((effect) => {
@@ -1317,10 +1290,7 @@ function resetGame() {
   player.health = 100;
   player.score = 0;
   player.wave = 1;
-  player.yaw = 0;
-  player.pitch = 0;
-  camera.position.set(0, PLAYER_HEIGHT, 9);
-  camera.rotation.set(0, 0, 0);
+  moveCameraToSpawn();
   spawnTimer = 0;
   lastDamageAt = 0;
   lastShotAt = 0;
@@ -1333,12 +1303,8 @@ function resetGame() {
   gameState = GameState.PLAYING;
   updateHud();
   spawnWave();
-  createExplosiveBarrel([-6, 0.6, 6]);
-  createExplosiveBarrel([7, 0.6, 1]);
-  createExplosiveBarrel([12, 0.6, -8]);
-  createAmmoPickup([-7, 0.5, 8]);
-  createAmmoPickup([9, 0.5, 12]);
-  createAmmoPickup([13, 0.5, -7]);
+  placeBarrels();
+  placeAmmoPickups();
   document.body.requestPointerLock();
 }
 
@@ -1447,7 +1413,7 @@ window.addEventListener("resize", () => {
   updateRenderQuality();
 });
 
-createArena();
+setupArenaMap();
 loadGameAssets();
 createWeapon();
 updateWeaponAppearance();
