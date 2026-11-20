@@ -1,10 +1,10 @@
 import * as THREE from "three";
 import { GLTFLoader } from "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/loaders/GLTFLoader.js";
-import { FBXLoader } from "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/loaders/FBXLoader.js";
 import * as SkeletonUtils from "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/utils/SkeletonUtils.js";
 import { loadArenaMap } from "./map.js";
 
 const PLAYER_HEIGHT = 1.7;
+const ENEMY_HEIGHT = PLAYER_HEIGHT;
 const PLAYER_RADIUS = 0.33;
 const ENEMY_RADIUS = 0.5;
 const PLAYER_SPEED = 7;
@@ -98,14 +98,9 @@ const reloadSound = new Audio("./bullet.mp3");
 const raycaster = new THREE.Raycaster();
 const clock = new THREE.Clock();
 const gltfLoader = new GLTFLoader();
-const fbxLoader = new FBXLoader();
-const textureLoader = new THREE.TextureLoader();
 const blasterModels = [];
-let kenneyEnemyModel;
-let kenneyEnemyAnimations = [];
-let survivorEnemyModel;
-let survivorEnemyAnimations = [];
-let survivorEnemyTexture;
+let soldierModel;
+let soldierAnimations;
 let polyhavenAmmoModel;
 let weapon;
 let muzzleFlash;
@@ -207,11 +202,6 @@ function explodeBarrel(barrel) {
     if (distance > BARREL_EXPLOSION_RADIUS) return;
     const damage = Math.round(BARREL_EXPLOSION_DAMAGE * (1 - distance / BARREL_EXPLOSION_RADIUS));
     enemy.userData.health = Math.max(0, enemy.userData.health - damage);
-    if (enemy.userData.proceduralAnimation) {
-      enemy.userData.proceduralAnimation.state = "hit";
-      enemy.userData.proceduralAnimation.time = 0;
-      enemy.userData.hitUntil = performance.now() + 350;
-    }
     updateEnemyHealthBar(enemy);
     if (enemy.userData.health === 0) {
       removeEnemy(enemy);
@@ -259,11 +249,13 @@ function fitModel(model, size) {
 }
 
 function fitEnemyModel(model, height) {
-  const bounds = new THREE.Box3().setFromObject(model);
-  const currentHeight = bounds.getSize(new THREE.Vector3()).y;
-  model.scale.multiplyScalar(height / Math.max(currentHeight, 0.001));
-  const fittedBounds = new THREE.Box3().setFromObject(model);
-  model.position.y -= fittedBounds.min.y;
+  // SkinnedMesh updates its inverse bind matrix in updateMatrixWorld.
+  model.updateMatrixWorld(true);
+  const bounds = new THREE.Box3().setFromObject(model, true);
+  const currentHeight = bounds.max.y - bounds.min.y;
+  const scale = height / Math.max(currentHeight, 0.001);
+  model.scale.multiplyScalar(scale);
+  model.position.y = (model.position.y - bounds.min.y) * scale;
 }
 
 function findEnemySpawnPosition() {
@@ -284,52 +276,29 @@ function findEnemySpawnPosition() {
   return arenaMap.randomWalkablePoint(0.7) || new THREE.Vector3(0, 0, -20);
 }
 
+async function loadSoldier() {
+  try {
+    const { scene, animations } = await gltfLoader.loadAsync("./assets/Soldier.glb");
+    const walk = THREE.AnimationClip.findByName(animations, "walk");
+    const shoot = THREE.AnimationClip.findByName(animations, "shoot");
+
+    // The armature's local Y axis points forward in the world.
+    const hipsPosition = walk.tracks.find((track) => track.name === "mixamorigHips.position");
+    for (let i = 1; i < hipsPosition.values.length; i += 3) {
+      hipsPosition.values[i] = hipsPosition.values[1];
+    }
+
+    const idle = THREE.AnimationUtils.subclip(shoot, "idle", 0, 2, 24);
+    idle.duration = 1;
+    fitEnemyModel(scene, ENEMY_HEIGHT);
+    soldierAnimations = [idle, walk, shoot];
+    soldierModel = scene;
+  } catch (error) {
+    console.warn("敵人模型載入失敗：Soldier.glb", error);
+  }
+}
+
 function loadGameAssets() {
-  fbxLoader.load(
-    "./assets/animated-characters-survivors/Model/characterMedium.fbx",
-    (model) => {
-      survivorEnemyModel = model;
-      if (survivorEnemyTexture) {
-        survivorEnemyModel.traverse((object) => {
-          if (object.isMesh) object.material.map = survivorEnemyTexture;
-        });
-      }
-      survivorEnemyAnimations = [];
-      const animationFiles = [
-        ["idle", "idle.fbx"],
-        ["walk", "run.fbx"],
-        ["jump", "jump.fbx"],
-      ];
-      animationFiles.forEach(([name, file]) => {
-        fbxLoader.load(
-          `./assets/animated-characters-survivors/Animations/${file}`,
-          (animation) => {
-            animation.animations.forEach((clip) => {
-              clip.name = name;
-              survivorEnemyAnimations.push(clip);
-            });
-          },
-          undefined,
-          (error) => console.warn(`敵人動畫載入失敗：${file}`, error),
-        );
-      });
-    },
-    undefined,
-    (error) => console.warn("3D 素材載入失敗：animated-characters-survivors", error),
-  );
-  textureLoader.load(
-    "./assets/animated-characters-survivors/Skins/zombieA.png",
-    (texture) => {
-      texture.colorSpace = THREE.SRGBColorSpace;
-      texture.flipY = false;
-      survivorEnemyTexture = texture;
-      survivorEnemyModel?.traverse((object) => {
-        if (object.isMesh) object.material.map = texture;
-      });
-    },
-    undefined,
-    (error) => console.warn("敵人材質載入失敗：zombieA.png", error),
-  );
   loadModel("./assets/polyhaven/ammo_box/ammo_box.gltf", (model) => {
     polyhavenAmmoModel = model;
   }, "Poly Haven ammo_box");
@@ -358,78 +327,6 @@ function setEnemyAnimation(enemy, name, loop = THREE.LoopRepeat) {
   action.fadeIn(0.12).play();
   if (previousAction && previousAction !== action) previousAction.fadeOut(0.12);
   enemy.userData.currentAnimation = name;
-}
-
-function getEnemyBone(character, name) {
-  return character.getObjectByName(`mixamorig:${name}`);
-}
-
-function rotateEnemyBone(bone, baseQuaternion, axis, angle) {
-  if (!bone) return;
-  bone.quaternion.copy(baseQuaternion);
-  bone.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(axis, angle));
-}
-
-function updateProceduralEnemyAnimation(enemy, delta, elapsed) {
-  const animation = enemy.userData.proceduralAnimation;
-  if (!animation) return;
-
-  animation.time += delta;
-  const t = animation.time;
-  const bones = animation.bones;
-  const base = animation.baseRotations;
-  const character = animation.character;
-  const speed = animation.state === "walk" ? 9 : 3;
-  const wave = Math.sin(t * speed);
-  const oppositeWave = Math.sin(t * speed + Math.PI);
-  const xAxis = new THREE.Vector3(1, 0, 0);
-  const yAxis = new THREE.Vector3(0, 1, 0);
-  const zAxis = new THREE.Vector3(0, 0, 1);
-
-  Object.entries(bones)
-    .filter(([, bone]) => bone)
-    .forEach(([name, bone]) => {
-    bone.quaternion.copy(base[name]);
-    });
-  character.rotation.set(0, 0, 0);
-
-  if (animation.state === "walk") {
-    rotateEnemyBone(bones.leftArm, base.leftArm, zAxis, -1.5 + oppositeWave * 0.55);
-    rotateEnemyBone(bones.rightArm, base.rightArm, zAxis, 1.5 + wave * 0.55);
-    rotateEnemyBone(bones.leftForeArm, base.leftForeArm, xAxis, 0.25);
-    rotateEnemyBone(bones.rightForeArm, base.rightForeArm, xAxis, 0.25);
-    rotateEnemyBone(bones.leftUpLeg, base.leftUpLeg, xAxis, wave * 0.75);
-    rotateEnemyBone(bones.rightUpLeg, base.rightUpLeg, xAxis, oppositeWave * 0.75);
-    rotateEnemyBone(bones.leftLeg, base.leftLeg, xAxis, Math.max(0, -wave) * 0.55);
-    rotateEnemyBone(bones.rightLeg, base.rightLeg, xAxis, Math.max(0, -oppositeWave) * 0.55);
-    rotateEnemyBone(bones.spine, base.spine, zAxis, wave * 0.025);
-    character.rotation.z = wave * 0.06;
-    character.position.y = Math.abs(wave) * 0.035;
-  } else if (animation.state === "shoot") {
-    rotateEnemyBone(bones.leftArm, base.leftArm, zAxis, -0.9);
-    rotateEnemyBone(bones.rightArm, base.rightArm, zAxis, 0.9);
-    rotateEnemyBone(bones.leftForeArm, base.leftForeArm, xAxis, -0.65);
-    rotateEnemyBone(bones.rightForeArm, base.rightForeArm, xAxis, -0.65);
-    rotateEnemyBone(bones.spine, base.spine, xAxis, -0.08);
-    character.rotation.x = -0.1;
-    character.position.y = 0.02;
-  } else if (animation.state === "hit") {
-    const hitWave = Math.sin(Math.min(t, 0.35) / 0.35 * Math.PI);
-    rotateEnemyBone(bones.spine, base.spine, zAxis, hitWave * 0.18);
-    rotateEnemyBone(bones.head, base.head, zAxis, hitWave * -0.12);
-    rotateEnemyBone(bones.leftArm, base.leftArm, zAxis, -1.5 + hitWave * 0.5);
-    rotateEnemyBone(bones.rightArm, base.rightArm, zAxis, 1.5 - hitWave * 0.5);
-    character.rotation.z = hitWave * 0.12;
-  } else {
-    rotateEnemyBone(bones.leftArm, base.leftArm, zAxis, -1.5);
-    rotateEnemyBone(bones.rightArm, base.rightArm, zAxis, 1.5);
-    rotateEnemyBone(bones.leftForeArm, base.leftForeArm, xAxis, -0.25);
-    rotateEnemyBone(bones.rightForeArm, base.rightForeArm, xAxis, -0.25);
-    rotateEnemyBone(bones.spine, base.spine, zAxis, Math.sin(t * 2) * 0.025);
-    rotateEnemyBone(bones.head, base.head, zAxis, Math.sin(t * 2 + 0.5) * 0.02);
-    rotateEnemyBone(bones.hips, base.hips, yAxis, Math.sin(t * 2) * 0.02);
-    character.position.y = Math.sin(t * 2) * 0.015;
-  }
 }
 
 function playSound(source, volume = 0.6) {
@@ -493,7 +390,7 @@ function createArenaAccents(map) {
   pinkLight.position.set(bounds.maxX - 4, 5, bounds.maxZ - 4);
 }
 
-async function setupArenaMap() {
+async function setupArenaMap(soldierReady) {
   createArenaBackdrop();
   startScreen.classList.remove("hidden");
   startButton.disabled = true;
@@ -509,6 +406,8 @@ async function setupArenaMap() {
     minimapBackground = arenaMap.createMinimapBackground(minimap.width);
     createArenaAccents(arenaMap);
     moveCameraToSpawn();
+    startButton.textContent = "準備敵人模型…";
+    await soldierReady;
     startButton.disabled = false;
     startButton.textContent = "開始遊戲";
     noticeElement.textContent = "地圖載入完成，點擊「開始遊戲」鎖定滑鼠";
@@ -689,59 +588,23 @@ function switchWeapon() {
 
 function createEnemy() {
   const enemy = new THREE.Group();
-  const enemySource = survivorEnemyModel || kenneyEnemyModel;
-  const enemyAnimations = survivorEnemyModel
-    ? survivorEnemyAnimations
-    : kenneyEnemyAnimations;
-  if (enemySource) {
-    const character = SkeletonUtils.clone(enemySource);
-    fitEnemyModel(character, 1.7);
+  if (soldierModel) {
+    const character = SkeletonUtils.clone(soldierModel);
     character.traverse((object) => {
       object.userData.enemy = enemy;
-      if (object.isMesh) {
-        object.material = object.material.clone();
-        if ("emissive" in object.material) {
-          object.material.emissive.set(0x000000);
-          object.material.emissiveIntensity = 0;
-        }
-      }
     });
     enemy.add(character);
     enemy.userData.hitboxSource = character;
+
     const mixer = new THREE.AnimationMixer(character);
-    const actions = {};
-    enemyAnimations.forEach((clip) => {
-      actions[clip.name] = mixer.clipAction(clip);
-    });
     enemy.userData.mixer = mixer;
-    enemy.userData.actions = actions;
-    if (!survivorEnemyModel) {
-      const bones = {
-        hips: getEnemyBone(character, "Hips"),
-        spine: getEnemyBone(character, "Spine"),
-        head: getEnemyBone(character, "Head"),
-        leftArm: getEnemyBone(character, "LeftArm"),
-        rightArm: getEnemyBone(character, "RightArm"),
-        leftForeArm: getEnemyBone(character, "LeftForeArm"),
-        rightForeArm: getEnemyBone(character, "RightForeArm"),
-        leftUpLeg: getEnemyBone(character, "LeftUpLeg"),
-        rightUpLeg: getEnemyBone(character, "RightUpLeg"),
-        leftLeg: getEnemyBone(character, "LeftLeg"),
-        rightLeg: getEnemyBone(character, "RightLeg"),
-      };
-      const baseRotations = Object.fromEntries(
-        Object.entries(bones)
-          .filter(([, bone]) => bone)
-          .map(([name, bone]) => [name, bone.quaternion.clone()]),
-      );
-      enemy.userData.proceduralAnimation = {
-        character,
-        bones,
-        baseRotations,
-        state: "idle",
-        time: Math.random() * Math.PI,
-      };
-    }
+    enemy.userData.actions = Object.fromEntries(
+      soldierAnimations.map((clip) => [clip.name, mixer.clipAction(clip)]),
+    );
+    enemy.userData.currentAnimation = "idle";
+    enemy.userData.actions.idle.play();
+    mixer.update(0);
+    enemy.updateMatrixWorld(true);
   } else {
   const body = new THREE.Mesh(
     new THREE.SphereGeometry(0.75, 16, 12),
@@ -792,15 +655,11 @@ function createEnemy() {
   enemy.userData.healthBar = healthBar;
   enemy.userData.lastShotAt = performance.now() + Math.random() * ENEMY_FIRE_COOLDOWN;
   enemy.userData.attackUntil = 0;
-  enemy.userData.hitUntil = 0;
   enemy.userData.wanderTarget = arenaMap
     ? arenaMap.randomWalkablePoint(0.7)
     : new THREE.Vector3(0, 0, 0);
   enemy.userData.wanderUntil = performance.now() + THREE.MathUtils.randFloat(1800, 4200);
   enemy.userData.stuckTime = 0;
-  if (enemy.userData.proceduralAnimation) {
-    enemy.userData.proceduralAnimation.state = "idle";
-  }
   scene.add(enemy);
   enemies.push(enemy);
   updateHud();
@@ -841,11 +700,7 @@ function fireEnemyProjectile(enemy) {
   scene.add(projectile);
   enemyProjectiles.push(projectile);
   enemy.userData.attackUntil = performance.now() + 700;
-  if (enemy.userData.proceduralAnimation) {
-    enemy.userData.proceduralAnimation.state = "shoot";
-    enemy.userData.proceduralAnimation.time = 0;
-  }
-  setEnemyAnimation(enemy, "holding-both-shoot", THREE.LoopOnce);
+  setEnemyAnimation(enemy, "shoot", THREE.LoopOnce);
 }
 
 function removeEnemyProjectile(projectile) {
@@ -958,11 +813,6 @@ function shoot() {
     || enemyHits[0]?.object.parent;
   if (!enemy || !enemy.userData.health) return;
   enemy.userData.health = Math.max(0, enemy.userData.health - selectedWeapon.damage);
-  if (enemy.userData.proceduralAnimation) {
-    enemy.userData.proceduralAnimation.state = "hit";
-    enemy.userData.proceduralAnimation.time = 0;
-    enemy.userData.hitUntil = performance.now() + 350;
-  }
   updateEnemyHealthBar(enemy);
   if (enemy.userData.health === 0) {
     removeEnemy(enemy);
@@ -1088,7 +938,7 @@ function moveEnemyWithSlide(enemy, stepX, stepZ) {
   return tryMove(stepX, 0) || tryMove(0, stepZ);
 }
 
-function updateEnemies(delta, elapsed) {
+function updateEnemies(delta) {
   enemies.forEach((enemy) => {
     enemy.userData.mixer?.update(delta);
     const toPlayer = camera.position.clone().sub(enemy.position);
@@ -1136,16 +986,6 @@ function updateEnemies(delta, elapsed) {
       enemy.position.y = arenaMap.groundAt(enemy.position.x, enemy.position.z);
     } else {
       enemy.position.y = 0;
-    }
-    if (enemy.userData.proceduralAnimation) {
-      if (performance.now() < enemy.userData.hitUntil) {
-        enemy.userData.proceduralAnimation.state = "hit";
-      } else if (performance.now() < enemy.userData.attackUntil) {
-        enemy.userData.proceduralAnimation.state = "shoot";
-      } else {
-        enemy.userData.proceduralAnimation.state = moved ? "walk" : "idle";
-      }
-      updateProceduralEnemyAnimation(enemy, delta, elapsed);
     }
     enemy.userData.healthBar.lookAt(camera.position);
     if (performance.now() >= enemy.userData.attackUntil) {
@@ -1339,7 +1179,7 @@ function animate() {
 
   if (gameState === GameState.PLAYING) {
     updatePlayer(delta);
-    updateEnemies(delta, elapsed);
+    updateEnemies(delta);
     updateEnemyProjectiles(delta);
     updateAmmoPickups(elapsed);
     updateExplosionEffects(delta);
@@ -1413,7 +1253,7 @@ window.addEventListener("resize", () => {
   updateRenderQuality();
 });
 
-setupArenaMap();
+setupArenaMap(loadSoldier());
 loadGameAssets();
 createWeapon();
 updateWeaponAppearance();
